@@ -1,19 +1,14 @@
 """Script to fine-tune facebook/mms-lid-126 for 3-class language identification.
 
-This script expects JSON manifest(s) with entries that map utterance IDs to
-metadata dictionaries. Each metadata dictionary must contain a `wav` key that
-points to a local audio file on disk and a `lang` key with one of the language
-labels ("en", "zh", or "other"). An optional `length` field is ignored by the
-training pipeline but can remain in the manifest. Example manifest:
+This script expects JSONL manifest(s) where each line is a JSON object that
+describes a single utterance. Each record must contain an `audio` (or `wav`)
+field pointing to a local audio file on disk and a `lang` field with one of the
+language labels ("en", "zh", or "other"). An optional `id` (or `utt_id`) field
+can be provided to name the utterance; otherwise IDs are generated
+automatically. Example manifest:
 
 ```
-{
-  "utt_7fa3a1d7ca9c": {
-    "wav": "/path/to/audio.wav",
-    "lang": "zh",
-    "length": 2.85
-  }
-}
+{"id": "utt_7fa3a1d7ca9c", "audio": "/path/to/audio.wav", "lang": "zh"}
 ```
 
 The script can be pointed at separate training and evaluation manifests or can
@@ -245,13 +240,13 @@ def parse_args() -> FinetuneConfig:
     parser.add_argument(
         "--train-manifest",
         required=True,
-        help="Path to the training manifest JSON file.",
+        help="Path to the training manifest JSONL file.",
     )
     parser.add_argument(
         "--eval-manifest",
         default=None,
         help=(
-            "Optional path to the evaluation manifest JSON file. If omitted and "
+            "Optional path to the evaluation manifest JSONL file. If omitted and "
             "--validation-split > 0, a split will be created from the training manifest."
         ),
     )
@@ -327,28 +322,42 @@ def parse_args() -> FinetuneConfig:
 
 
 def read_manifest(path: str) -> List[Dict[str, str]]:
-    """Load manifest JSON file and convert to a list of training examples."""
+    """Load a JSONL manifest file and convert it to a list of training examples."""
 
+    examples: List[Dict[str, str]] = []
     with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Failed to parse JSON on line {line_no} of {path}: {exc}"
+                ) from exc
+            if not isinstance(record, dict):
+                raise ValueError(
+                    f"Manifest rows must be JSON objects, got {type(record)} on line {line_no}"
+                )
 
-    if isinstance(data, list):
-        examples = data
-    elif isinstance(data, dict):
-        examples = []
-        for utt_id, meta in data.items():
-            if not isinstance(meta, dict):
-                raise ValueError(f"Entry for {utt_id} must be a dict, got {type(meta)}")
-            example = {
-                "id": utt_id,
-                "audio": meta.get("wav"),
-                "lang": meta.get("lang"),
-            }
-            if not example["audio"] or not example["lang"]:
-                raise ValueError(f"Entry {utt_id} must contain 'wav' and 'lang' keys.")
+            audio = record.get("audio") or record.get("wav")
+            lang = record.get("lang") or record.get("language")
+            utt_id = record.get("id") or record.get("utt_id") or record.get("uttid")
+
+            if not audio or not lang:
+                raise ValueError(
+                    f"Line {line_no} must contain 'audio' (or 'wav') and 'lang' fields."
+                )
+
+            if utt_id is None:
+                utt_id = f"utt_{line_no:06d}"
+
+            example = {"id": str(utt_id), "audio": audio, "lang": lang}
             examples.append(example)
-    else:
-        raise ValueError("Manifest must be either a list or a dict of utterance metadata.")
+
+    if not examples:
+        raise ValueError(f"Manifest {path} produced no usable rows.")
 
     for example in examples:
         if example["lang"] not in LANG_LABELS:

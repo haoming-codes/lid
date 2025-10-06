@@ -98,21 +98,41 @@ def is_s3_uri(p: str) -> bool:
     return isinstance(p, str) and p.startswith("s3://")
 
 def load_manifest_to_dataset(manifest_path: str, audio_col: Optional[str], label_col: Optional[str], path_root: Optional[str]) -> Dataset:
-    # If it's JSON/JSONL on S3, HF Datasets can read it directly as long as s3fs is installed.
+    # If it's JSONL on S3, HF Datasets can read it directly as long as s3fs is installed.
     # (falls back to fsspec for non-standard shapes)
     try:
         ds = load_dataset("json", data_files=manifest_path, split="train")  # supports s3:// via fsspec/s3fs
     except Exception:
-        # manual read (works for dict/list/JSONL)
-        open_fn = (lambda p: fsspec.open(p, "rb").open()) if is_s3_uri(manifest_path) else (lambda p: open(p, "rb"))
+        # Manual read (handles JSONL with arbitrary newlines/whitespace)
+        open_fn = (
+            lambda p: fsspec.open(p, "rt", encoding="utf-8").open()
+        ) if is_s3_uri(manifest_path) else (lambda p: open(p, "r", encoding="utf-8"))
+        rows = []
         with open_fn(manifest_path) as f:
-            raw = f.read()
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except Exception:
-            # JSONL fallback
-            data = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
-        rows = [dict(v, utt_id=k) for k, v in data.items()] if isinstance(data, dict) else data
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Failed to parse JSON on line {line_no} of {manifest_path}: {exc}"
+                    ) from exc
+                if not isinstance(record, dict):
+                    raise ValueError(
+                        f"Manifest rows must be JSON objects, got {type(record)} on line {line_no}"
+                    )
+                if "utt_id" not in record:
+                    for key in ("id", "uttid", "utterance_id"):
+                        if key in record and record[key]:
+                            record.setdefault("utt_id", record[key])
+                            break
+                if "utt_id" not in record:
+                    record["utt_id"] = f"utt_{line_no:06d}"
+                rows.append(record)
+        if not rows:
+            raise ValueError(f"Manifest {manifest_path} produced no usable rows.")
         ds = Dataset.from_list(rows)
 
     a_col, y_col = (audio_col, label_col) if (audio_col and label_col) else _auto_cols(ds.column_names)

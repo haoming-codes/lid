@@ -21,8 +21,8 @@ estimator = PyTorch(
     # environment={"TOKENIZERS_PARALLELISM": "false"},
     hyperparameters={
         # read manifests and audio directly from S3
-        "train-manifest": "s3://us-west-2-ehmli/lid-job/manifests/data_train_0930.s3.json",
-        "eval-manifest":  "s3://us-west-2-ehmli/lid-job/manifests/data_valid_0930.s3.json",
+        "train-manifest": "s3://us-west-2-ehmli/lid-job/manifests/data_train_0930.s3.jsonl",
+        "eval-manifest":  "s3://us-west-2-ehmli/lid-job/manifests/data_valid_0930.s3.jsonl",
         "num-epochs": 10,
         "batch-size": 8,
         "lr": 1e-4,
