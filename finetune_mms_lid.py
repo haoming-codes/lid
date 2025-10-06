@@ -31,6 +31,7 @@ from typing import Dict, List, Optional
 import numpy as np
 from datasets import Audio, ClassLabel, Dataset, DatasetDict
 import evaluate
+import torch
 from transformers import (
     AutoFeatureExtractor,
     AutoModelForAudioClassification,
@@ -41,6 +42,173 @@ from transformers import (
 )
 
 LANG_LABELS = ["en", "zh", "other"]
+
+# ISO 639-3 codes representing the 126 language classes in the
+# facebook/mms-lid-126 checkpoint. The order matches the classifier head.
+MMS_LID_LANGUAGE_CODES = [
+    "ara",
+    "cmn",
+    "eng",
+    "spa",
+    "fra",
+    "mlg",
+    "swe",
+    "por",
+    "vie",
+    "ful",
+    "sun",
+    "asm",
+    "ben",
+    "zlm",
+    "kor",
+    "ind",
+    "hin",
+    "tuk",
+    "urd",
+    "aze",
+    "slv",
+    "mon",
+    "hau",
+    "tel",
+    "swh",
+    "bod",
+    "rus",
+    "tur",
+    "heb",
+    "mar",
+    "som",
+    "tgl",
+    "tat",
+    "tha",
+    "cat",
+    "ron",
+    "mal",
+    "bel",
+    "pol",
+    "yor",
+    "nld",
+    "bul",
+    "hat",
+    "afr",
+    "isl",
+    "amh",
+    "tam",
+    "hun",
+    "hrv",
+    "lit",
+    "cym",
+    "fas",
+    "mkd",
+    "ell",
+    "bos",
+    "deu",
+    "sqi",
+    "jav",
+    "nob",
+    "uzb",
+    "snd",
+    "lat",
+    "nya",
+    "grn",
+    "mya",
+    "orm",
+    "lin",
+    "hye",
+    "yue",
+    "pan",
+    "jpn",
+    "kaz",
+    "npi",
+    "kat",
+    "guj",
+    "kan",
+    "tgk",
+    "ukr",
+    "ces",
+    "lav",
+    "bak",
+    "khm",
+    "fao",
+    "glg",
+    "ltz",
+    "lao",
+    "mlt",
+    "sin",
+    "sna",
+    "ita",
+    "srp",
+    "mri",
+    "nno",
+    "pus",
+    "eus",
+    "ory",
+    "lug",
+    "bre",
+    "luo",
+    "slk",
+    "fin",
+    "dan",
+    "yid",
+    "est",
+    "ceb",
+    "war",
+    "san",
+    "kir",
+    "oci",
+    "wol",
+    "haw",
+    "kam",
+    "umb",
+    "xho",
+    "epo",
+    "zul",
+    "ibo",
+    "abk",
+    "ckb",
+    "nso",
+    "gle",
+    "kea",
+    "ast",
+    "sco",
+    "glv",
+    "ina",
+]
+
+# Languages that predominantly represent the "other" label in our downstream
+# dataset (East and Southeast Asia, excluding China but including India).
+OTHER_CLASS_LANGUAGE_CODES = [
+    "asm",
+    "ben",
+    "hin",
+    "urd",
+    "tel",
+    "tam",
+    "mal",
+    "mar",
+    "pan",
+    "guj",
+    "kan",
+    "ory",
+    "san",
+    "npi",
+    "sin",
+    "pus",
+    "vie",
+    "sun",
+    "zlm",
+    "kor",
+    "ind",
+    "jav",
+    "tgl",
+    "tha",
+    "mon",
+    "mya",
+    "khm",
+    "lao",
+    "ceb",
+    "war",
+    "jpn",
+]
 
 
 @dataclass
@@ -69,6 +237,7 @@ class FinetuneConfig:
     max_eval_samples: Optional[int]
     dataloader_num_workers: int
     preprocessing_num_workers: int
+    initialize_other_from_average: bool
 
 
 def parse_args() -> FinetuneConfig:
@@ -143,6 +312,14 @@ def parse_args() -> FinetuneConfig:
         type=int,
         default=4,
         help="Number of worker processes to use during dataset preprocessing steps.",
+    )
+    parser.add_argument(
+        "--initialize-other-from-average",
+        action="store_true",
+        help=(
+            "Initialize the 'other' classification head using the average of selected"
+            " MMS LID languages (East and Southeast Asia, excluding China)."
+        ),
     )
 
     args = parser.parse_args()
@@ -281,6 +458,49 @@ def main():
         label2id=label2id,
         ignore_mismatched_sizes=True,
     )
+
+    if config.initialize_other_from_average:
+        logger.info("Initializing 'other' class weights from MMS LID language average")
+        base_model = AutoModelForAudioClassification.from_pretrained(model_name)
+        source_classifier = getattr(base_model, "classifier", None)
+        target_classifier = getattr(model, "classifier", None)
+
+        if source_classifier is None or target_classifier is None:
+            logger.warning("Could not access classifier modules; skipping custom initialization.")
+        elif not hasattr(source_classifier, "weight") or not hasattr(target_classifier, "weight"):
+            logger.warning("Classifier modules do not expose weights; skipping custom initialization.")
+        else:
+            iso_to_index = {code: idx for idx, code in enumerate(MMS_LID_LANGUAGE_CODES)}
+            missing_codes = [code for code in OTHER_CLASS_LANGUAGE_CODES if code not in iso_to_index]
+            if missing_codes:
+                logger.warning(
+                    "Some requested languages are missing from MMS LID head (%s); skipping custom initialization.",
+                    ", ".join(missing_codes),
+                )
+            else:
+                indices = [iso_to_index[code] for code in OTHER_CLASS_LANGUAGE_CODES]
+                source_weight = source_classifier.weight.detach()
+                source_bias = (
+                    source_classifier.bias.detach() if hasattr(source_classifier, "bias") and source_classifier.bias is not None else None
+                )
+
+                device = target_classifier.weight.device
+                avg_weight = source_weight[indices].mean(dim=0).to(device)
+                with torch.no_grad():
+                    target_classifier.weight[label2id["other"]].copy_(avg_weight)
+                    if (
+                        source_bias is not None
+                        and hasattr(target_classifier, "bias")
+                        and target_classifier.bias is not None
+                    ):
+                        avg_bias = source_bias[indices].mean().to(device)
+                        target_classifier.bias[label2id["other"]].copy_(avg_bias)
+                logger.info(
+                    "Initialized 'other' class weights using %d MMS LID languages.",
+                    len(indices),
+                )
+
+        del base_model
 
     if config.freeze_feature_extractor:
         logger.info("Freezing feature extractor")
