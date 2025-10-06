@@ -2,7 +2,7 @@ transformers[torch]
 torchaudio
 torchvision
 datasets[audio]
-datasets
+evaluate
 scikit-learn
 fsspec>=2024.6.0
 s3fs>=2024.6.0
