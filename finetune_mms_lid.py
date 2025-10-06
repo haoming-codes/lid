@@ -317,7 +317,7 @@ def main():
         learning_rate=config.learning_rate,
         per_device_train_batch_size=config.per_device_train_batch_size,
         per_device_eval_batch_size=config.per_device_eval_batch_size,
-        evaluation_strategy=eval_strategy,
+        eval_strategy=eval_strategy,
         logging_strategy="steps",
         logging_steps=config.logging_steps,
         save_strategy="steps",
