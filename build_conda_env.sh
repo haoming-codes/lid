@@ -37,7 +37,7 @@ conda config --env --add channels conda-forge
 conda config --env --set channel_priority flexible
 
 # Core scientific stack
-conda install -y numpy pandas scipy ffmpeg
+conda install -y numpy pandas scipy ffmpeg pyarrow soxr-python
 
 # Hugging Face stack; install torch via pip to ensure CUDA/cuDNN compatibility on SageMaker DLCs
 pip install --upgrade pip
