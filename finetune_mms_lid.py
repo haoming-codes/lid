@@ -270,11 +270,16 @@ def main():
     label2id = {label: i for i, label in id2label.items()}
 
     logger.info("Loading model %s", model_name)
+    logger.info(
+        "Initializing classification head with %d labels and ignoring mismatched head weights",
+        len(LANG_LABELS),
+    )
     model = AutoModelForAudioClassification.from_pretrained(
         model_name,
         num_labels=len(LANG_LABELS),
         id2label=id2label,
         label2id=label2id,
+        ignore_mismatched_sizes=True,
     )
 
     if config.freeze_feature_extractor:
