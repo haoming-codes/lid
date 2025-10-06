@@ -67,6 +67,8 @@ class FinetuneConfig:
     validation_split: float
     max_train_samples: Optional[int]
     max_eval_samples: Optional[int]
+    dataloader_num_workers: int
+    preprocessing_num_workers: int
 
 
 def parse_args() -> FinetuneConfig:
@@ -129,6 +131,18 @@ def parse_args() -> FinetuneConfig:
         type=int,
         default=None,
         help="Optional cap on number of evaluation samples for debugging.",
+    )
+    parser.add_argument(
+        "--dataloader-num-workers",
+        type=int,
+        default=4,
+        help="Number of worker processes for PyTorch DataLoader instances.",
+    )
+    parser.add_argument(
+        "--preprocessing-num-workers",
+        type=int,
+        default=4,
+        help="Number of worker processes to use during dataset preprocessing steps.",
     )
 
     args = parser.parse_args()
@@ -199,7 +213,8 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
         batch["label"] = class_label.str2int(batch["lang"])
         return batch
 
-    datasets = datasets.map(encode_label)
+    label_num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
+    datasets = datasets.map(encode_label, num_proc=label_num_proc)
 
     def preprocess_batch(batch):
         audio_arrays = [record["array"] for record in batch["audio"]]
@@ -211,10 +226,12 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
 
     for split in datasets:
         remove_cols = [col for col in datasets[split].column_names if col not in {"label"}]
+        num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
         datasets[split] = datasets[split].map(
             preprocess_batch,
             batched=True,
             remove_columns=remove_cols,
+            num_proc=num_proc,
         )
         datasets[split].set_format(type="torch")
 
@@ -310,6 +327,7 @@ def main():
         warmup_steps=config.warmup_steps,
         weight_decay=config.weight_decay,
         fp16=config.fp16,
+        dataloader_num_workers=config.dataloader_num_workers,
         load_best_model_at_end=eval_strategy != "no",
         metric_for_best_model="f1_macro" if eval_strategy != "no" else None,
     )
