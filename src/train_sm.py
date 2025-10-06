@@ -4,10 +4,10 @@ import os, sys, subprocess, argparse, json, random, numpy as np
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-# ---- optional: install extra deps shipped with the job ----
-REQ = "/opt/ml/code/requirements.txt"
-if os.path.exists(REQ):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", REQ])
+# # ---- optional: install extra deps shipped with the job ----
+# REQ = "/opt/ml/code/requirements.txt"
+# if os.path.exists(REQ):
+#     subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", REQ])
 
 import torch, torchaudio
 import torch.nn.functional as F
@@ -317,11 +317,17 @@ def train_lid_with_hf_from_manifests(
 
     train_ds_proc = train_ds.shuffle(seed=SEED).map(
         make_preprocess_fn(processor, True,  a_col, y_col, path_root),
-        remove_columns=train_ds.column_names
+        remove_columns=train_ds.column_names,
+        num_proc=max(1, min(os.cpu_count(), 16)),        # parallel workers
+        batched=False,             # process mini-batches per worker
+        # batch_size=32,    # larger = fewer Python calls; watch RAM
     )
     eval_ds_proc  = eval_ds.map(
         make_preprocess_fn(processor, False, a_col, y_col, path_root),
-        remove_columns=eval_ds.column_names
+        remove_columns=eval_ds.column_names,
+        num_proc=max(1, min(os.cpu_count(), 16)),        # parallel workers
+        batched=False,             # process mini-batches per worker
+        # batch_size=32,    # larger = fewer Python calls; watch RAM
     )
     collator = DataCollatorAudioClassification(processor)
 
