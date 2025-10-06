@@ -1,5 +1,5 @@
 # src/train_sm.py
-import io, fsspec
+import fsspec
 import os, sys, subprocess, argparse, json, random, numpy as np
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,9 +9,9 @@ from typing import Any, Dict, List, Optional, Tuple
 # if os.path.exists(REQ):
 #     subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", REQ])
 
-import torch, torchaudio
+import torch
 import torch.nn.functional as F
-from datasets import Dataset, load_dataset
+from datasets import Dataset, load_dataset, Audio
 from transformers import (
     AutoFeatureExtractor,
     Wav2Vec2ForSequenceClassification,
@@ -66,18 +66,6 @@ class PrettyEvalLogger(TrainerCallback):
 def set_seed(seed=SEED):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
-def resolve_path(p: str, root: Optional[str]) -> str:
-    if not p: return p
-    if os.path.isabs(p) or not root: return p
-    return os.path.normpath(os.path.join(root, p))
-
-def load_mono_resampled(path: str, target_sr: int = TARGET_SR) -> torch.Tensor:
-    wav, sr = torchaudio.load(path)
-    if wav.size(0) > 1: wav = wav.mean(dim=0, keepdim=True)
-    wav = wav.squeeze(0)
-    if sr != target_sr: wav = torchaudio.functional.resample(wav, sr, target_sr)
-    return wav
-
 def crop_or_pad(wav: torch.Tensor, num_samples: int, random_crop: bool) -> torch.Tensor:
     L = wav.numel()
     if L == num_samples: return wav
@@ -109,14 +97,6 @@ def normalize_lang(s: Any) -> str:
 def is_s3_uri(p: str) -> bool:
     return isinstance(p, str) and p.startswith("s3://")
 
-def resolve_path(p: str, root: Optional[str]) -> str:
-    # keep s3 URIs intact; only join local relatives
-    if not p:
-        return p
-    if is_s3_uri(p) or os.path.isabs(p) or not root:
-        return p
-    return os.path.normpath(os.path.join(root, p))
-
 def load_manifest_to_dataset(manifest_path: str, audio_col: Optional[str], label_col: Optional[str], path_root: Optional[str]) -> Dataset:
     # If it's JSON/JSONL on S3, HF Datasets can read it directly as long as s3fs is installed.
     # (falls back to fsspec for non-standard shapes)
@@ -146,7 +126,17 @@ def load_manifest_to_dataset(manifest_path: str, audio_col: Optional[str], label
             return ex
         ds = ds.map(_fix)
 
-    ds = ds.filter(lambda ex: bool(ex.get(a_col)) and bool(ex.get(y_col)))
+    ds = ds.cast_column(a_col, Audio(sampling_rate=TARGET_SR))
+
+    def _has_audio_and_label(ex):
+        audio = ex.get(a_col)
+        if isinstance(audio, dict):
+            has_audio = bool(audio.get("path")) or (audio.get("array") is not None)
+        else:
+            has_audio = bool(audio)
+        return has_audio and bool(ex.get(y_col))
+
+    ds = ds.filter(_has_audio_and_label)
     ds = ds.map(lambda ex: {**ex, y_col: normalize_lang(ex[y_col])})
     keep = [c for c in [a_col, y_col, "utt_id"] if c in ds.column_names]
     ds = ds.remove_columns([c for c in ds.column_names if c not in keep])
@@ -154,28 +144,14 @@ def load_manifest_to_dataset(manifest_path: str, audio_col: Optional[str], label
     ds.set_format(type=None)
     return ds
 
-def load_mono_resampled(path: str, target_sr: int = TARGET_SR) -> torch.Tensor:
-    # torchaudio.load accepts a file-like object; s3fs provides seekable file objects
-    if is_s3_uri(path):
-        with fsspec.open(path, "rb") as f:
-            wav, sr = torchaudio.load(f)  # file-like
-    else:
-        wav, sr = torchaudio.load(path)
-    if wav.size(0) > 1:
-        wav = wav.mean(dim=0, keepdim=True)
-    wav = wav.squeeze(0)
-    if sr != target_sr:
-        wav = torchaudio.functional.resample(wav, sr, target_sr)
-    return wav
-    
 # =========================
 # 3) Preprocessing
 # =========================
-def make_preprocess_fn(processor, is_train: bool, audio_col: str, label_col: str, path_root: Optional[str]):
+def make_preprocess_fn(processor, is_train: bool, audio_col: str, label_col: str):
     target_len = int((CROP_SECONDS_TRAIN if is_train else CROP_SECONDS_EVAL) * TARGET_SR)
     def _fn(example: Dict[str, Any]) -> Dict[str, Any]:
-        path = resolve_path(example[audio_col], path_root)
-        wav = load_mono_resampled(path, TARGET_SR)
+        audio = example[audio_col]
+        wav = torch.from_numpy(audio["array"]).float()
         wav = crop_or_pad(wav, target_len, random_crop=is_train)
         inputs = processor(wav.numpy(), sampling_rate=TARGET_SR, return_attention_mask=False)
         lab = example[label_col]
@@ -316,14 +292,14 @@ def train_lid_with_hf_from_manifests(
     smart_init_three_way_head(model, base_126)
 
     train_ds_proc = train_ds.shuffle(seed=SEED).map(
-        make_preprocess_fn(processor, True,  a_col, y_col, path_root),
+        make_preprocess_fn(processor, True,  a_col, y_col),
         remove_columns=train_ds.column_names,
         num_proc=max(1, min(os.cpu_count(), 16)),        # parallel workers
         batched=False,             # process mini-batches per worker
         # batch_size=32,    # larger = fewer Python calls; watch RAM
     )
     eval_ds_proc  = eval_ds.map(
-        make_preprocess_fn(processor, False, a_col, y_col, path_root),
+        make_preprocess_fn(processor, False, a_col, y_col),
         remove_columns=eval_ds.column_names,
         num_proc=max(1, min(os.cpu_count(), 16)),        # parallel workers
         batched=False,             # process mini-batches per worker
