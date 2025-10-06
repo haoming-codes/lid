@@ -32,8 +32,8 @@ import numpy as np
 from datasets import Audio, ClassLabel, Dataset, DatasetDict
 import evaluate
 from transformers import (
+    AutoFeatureExtractor,
     AutoModelForAudioClassification,
-    AutoProcessor,
     DataCollatorWithPadding,
     Trainer,
     TrainingArguments,
@@ -183,7 +183,7 @@ def read_manifest(path: str) -> List[Dict[str, str]]:
     return examples
 
 
-def build_dataset_dict(config: FinetuneConfig, processor) -> DatasetDict:
+def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict:
     train_examples = read_manifest(config.train_manifest)
     train_dataset = Dataset.from_list(train_examples)
 
@@ -202,12 +202,7 @@ def build_dataset_dict(config: FinetuneConfig, processor) -> DatasetDict:
         datasets["validation"] = eval_dataset
 
     # Ensure consistent sampling rate and label encoding
-    if hasattr(processor, "feature_extractor") and hasattr(processor.feature_extractor, "sampling_rate"):
-        sampling_rate = processor.feature_extractor.sampling_rate
-    elif hasattr(processor, "sampling_rate"):
-        sampling_rate = processor.sampling_rate
-    else:
-        raise AttributeError("Processor does not expose a sampling_rate attribute")
+    sampling_rate = feature_extractor.sampling_rate
     audio_feature = Audio(sampling_rate=sampling_rate)
     for split in datasets:
         datasets[split] = datasets[split].cast_column("audio", audio_feature)
@@ -223,7 +218,7 @@ def build_dataset_dict(config: FinetuneConfig, processor) -> DatasetDict:
 
     def preprocess_batch(batch):
         audio_arrays = [record["array"] for record in batch["audio"]]
-        inputs = processor(audio_arrays, sampling_rate=sampling_rate)
+        inputs = feature_extractor(audio_arrays, sampling_rate=sampling_rate)
         batch["input_values"] = inputs["input_values"]
         if "attention_mask" in inputs:
             batch["attention_mask"] = inputs["attention_mask"]
@@ -265,11 +260,11 @@ def main():
     set_seed(config.seed)
 
     model_name = "facebook/mms-lid-126"
-    logger.info("Loading processor %s", model_name)
-    processor = AutoProcessor.from_pretrained(model_name)
+    logger.info("Loading feature extractor %s", model_name)
+    feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
 
     logger.info("Loading datasets")
-    datasets = build_dataset_dict(config, processor)
+    datasets = build_dataset_dict(config, feature_extractor)
 
     id2label = {i: label for i, label in enumerate(LANG_LABELS)}
     label2id = {label: i for i, label in id2label.items()}
@@ -297,7 +292,7 @@ def main():
         else:
             logger.warning("Model does not expose a known feature extractor; skipping freeze.")
 
-    data_collator = DataCollatorWithPadding(processor, padding=True)
+    data_collator = DataCollatorWithPadding(feature_extractor, padding=True)
 
     accuracy = evaluate.load("accuracy")
     f1 = evaluate.load("f1")
@@ -347,7 +342,7 @@ def main():
         args=training_args,
         train_dataset=datasets["train"],
         eval_dataset=datasets.get("validation"),
-        tokenizer=processor,
+        processing_class=feature_extractor,
         data_collator=data_collator,
         compute_metrics=compute_metrics if "validation" in datasets else None,
     )
@@ -357,7 +352,7 @@ def main():
 
     logger.info("Saving final model to %s", config.output_dir)
     trainer.save_model(config.output_dir)
-    processor.save_pretrained(config.output_dir)
+    feature_extractor.save_pretrained(config.output_dir)
 
 
 if __name__ == "__main__":
