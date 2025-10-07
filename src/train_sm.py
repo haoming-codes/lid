@@ -146,12 +146,15 @@ def is_s3_uri(p: str) -> bool:
     return isinstance(p, str) and p.startswith("s3://")
 
 def load_manifest_to_dataset(manifest_path: str, audio_col: Optional[str], label_col: Optional[str], path_root: Optional[str]) -> Dataset:
+    print(f"[INFO] Loading manifest: {manifest_path}")
     # If it's JSON/JSONL on S3, HF Datasets can read it directly as long as s3fs is installed.
     # (falls back to fsspec for non-standard shapes)
     try:
         ds = load_dataset("json", data_files=manifest_path, split="train")  # supports s3:// via fsspec/s3fs
+        print(f"[INFO] Loaded manifest with datasets.load_dataset (rows={len(ds)}, columns={ds.column_names})")
     except Exception:
         # manual read (works for dict/list/JSONL)
+        print("[INFO] Falling back to manual JSON/JSONL parsing")
         open_fn = (lambda p: fsspec.open(p, "rb").open()) if is_s3_uri(manifest_path) else (lambda p: open(p, "rb"))
         with open_fn(manifest_path) as f:
             raw = f.read()
@@ -162,19 +165,24 @@ def load_manifest_to_dataset(manifest_path: str, audio_col: Optional[str], label
             data = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
         rows = [dict(v, utt_id=k) for k, v in data.items()] if isinstance(data, dict) else data
         ds = Dataset.from_list(rows)
+        print(f"[INFO] Loaded manifest via manual parsing (rows={len(ds)}, columns={ds.column_names})")
 
     a_col, y_col = (audio_col, label_col) if (audio_col and label_col) else _auto_cols(ds.column_names)
+    print(f"[INFO] Using audio column '{a_col}' and label column '{y_col}'")
 
     # only join local relative paths; leave s3:// alone
     if path_root:
+        print(f"[INFO] Resolving relative audio paths with root: {path_root}")
         def _fix(ex):
             p = ex[a_col]
             if p and (not is_s3_uri(p)) and (not os.path.isabs(p)):
                 ex[a_col] = os.path.normpath(os.path.join(path_root, p))
             return ex
-        ds = ds.map(_fix)
+        ds = ds.map(_fix, desc="Resolving relative audio paths")
 
     ds = ds.cast_column(a_col, Audio(sampling_rate=TARGET_SR))
+
+    initial_len = len(ds)
 
     def _has_audio_and_label(ex):
         audio = ex.get(a_col)
@@ -184,12 +192,27 @@ def load_manifest_to_dataset(manifest_path: str, audio_col: Optional[str], label
             has_audio = bool(audio)
         return has_audio and bool(ex.get(y_col))
 
-    ds = ds.filter(_has_audio_and_label)
-    ds = ds.map(lambda ex: {**ex, y_col: normalize_lang(ex[y_col])})
+    ds = ds.filter(_has_audio_and_label, desc="Filtering rows missing audio or labels")
+    filtered_len = len(ds)
+    print(
+        f"[INFO] Filtered dataset to rows with audio+label: kept={filtered_len} removed={initial_len - filtered_len}"
+    )
+    ds = ds.map(
+        lambda ex: {**ex, y_col: normalize_lang(ex[y_col])},
+        desc="Normalizing language labels",
+    )
+    label_counts = Counter(ds[y_col]) if filtered_len else Counter()
+    if label_counts:
+        print(f"[INFO] Normalized label distribution: {dict(label_counts)}")
+    else:
+        print("[WARN] No examples remaining after filtering")
     keep = [c for c in [a_col, y_col, "utt_id"] if c in ds.column_names]
     ds = ds.remove_columns([c for c in ds.column_names if c not in keep])
     ds._hf_audio_col = a_col; ds._hf_label_col = y_col
     ds.set_format(type=None)
+    print(
+        f"[INFO] Final dataset schema: kept_columns={keep}, num_rows={len(ds)}"
+    )
     return ds
 
 # =========================
@@ -345,6 +368,7 @@ def train_lid_with_hf_from_manifests(
         num_proc=max(1, min(os.cpu_count(), 16)),        # parallel workers
         batched=False,             # process mini-batches per worker
         # batch_size=32,    # larger = fewer Python calls; watch RAM
+        desc="Preprocessing training audio for feature extraction",
     )
     eval_ds_proc  = eval_ds.map(
         make_preprocess_fn(processor, False, a_col, y_col),
@@ -352,6 +376,7 @@ def train_lid_with_hf_from_manifests(
         num_proc=max(1, min(os.cpu_count(), 16)),        # parallel workers
         batched=False,             # process mini-batches per worker
         # batch_size=32,    # larger = fewer Python calls; watch RAM
+        desc="Preprocessing evaluation audio for feature extraction",
     )
     collator = DataCollatorAudioClassification(processor)
 
