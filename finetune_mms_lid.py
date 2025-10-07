@@ -1,19 +1,14 @@
 """Script to fine-tune facebook/mms-lid-126 for 3-class language identification.
 
-This script expects JSON manifest(s) with entries that map utterance IDs to
-metadata dictionaries. Each metadata dictionary must contain a `wav` key that
-points to a local audio file on disk and a `lang` key with one of the language
+This script expects JSON Lines (jsonl) manifest(s) with one JSON object per
+line. Each object must contain an `id` (or `utt_id`), a `wav` (or `audio`) key
+that points to an audio file on disk, and a `lang` key with one of the language
 labels ("en", "zh", or "other"). An optional `length` field is ignored by the
 training pipeline but can remain in the manifest. Example manifest:
 
 ```
-{
-  "utt_7fa3a1d7ca9c": {
-    "wav": "/path/to/audio.wav",
-    "lang": "zh",
-    "length": 2.85
-  }
-}
+{"id": "utt_7fa3a1d7ca9c", "wav": "/path/to/audio.wav", "lang": "zh", "length": 2.85}
+{"id": "utt_c80a11b7c96e", "audio": "/path/to/another.wav", "lang": "other"}
 ```
 
 The script can be pointed at separate training and evaluation manifests or can
@@ -22,14 +17,13 @@ perform an automatic train/validation split from a single manifest.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Optional
 
 import numpy as np
-from datasets import Audio, ClassLabel, Dataset, DatasetDict
+from datasets import Audio, ClassLabel, Dataset, DatasetDict, load_dataset
 import evaluate
 import torch
 from transformers import (
@@ -326,48 +320,65 @@ def parse_args() -> FinetuneConfig:
     return FinetuneConfig(**vars(args))
 
 
-def read_manifest(path: str) -> List[Dict[str, str]]:
-    """Load manifest JSON file and convert to a list of training examples."""
+def load_manifest_dataset(path: str) -> Dataset:
+    """Load and validate a jsonl manifest using the 🤗 Datasets loader."""
 
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        dataset = load_dataset("json", data_files=path, split="train")
+    except Exception as exc:  # pragma: no cover - surfaces config errors
+        raise ValueError(f"Failed to load manifest {path}: {exc}") from exc
 
-    if isinstance(data, list):
-        examples = data
-    elif isinstance(data, dict):
-        examples = []
-        for utt_id, meta in data.items():
-            if not isinstance(meta, dict):
-                raise ValueError(f"Entry for {utt_id} must be a dict, got {type(meta)}")
-            example = {
-                "id": utt_id,
-                "audio": meta.get("wav"),
-                "lang": meta.get("lang"),
-            }
-            if not example["audio"] or not example["lang"]:
-                raise ValueError(f"Entry {utt_id} must contain 'wav' and 'lang' keys.")
-            examples.append(example)
-    else:
-        raise ValueError("Manifest must be either a list or a dict of utterance metadata.")
+    if dataset.num_rows == 0:
+        raise ValueError(f"Manifest {path} did not contain any entries.")
 
-    for example in examples:
-        if example["lang"] not in LANG_LABELS:
+    if "id" not in dataset.column_names and "utt_id" in dataset.column_names:
+        dataset = dataset.rename_column("utt_id", "id")
+
+    required_columns = {"id", "lang"}
+    missing_columns = required_columns - set(dataset.column_names)
+    if missing_columns:
+        missing_list = ", ".join(sorted(missing_columns))
+        raise ValueError(f"Manifest {path} is missing required column(s): {missing_list}.")
+
+    if "audio" not in dataset.column_names:
+        if "wav" in dataset.column_names:
+            dataset = dataset.rename_column("wav", "audio")
+        else:
             raise ValueError(
-                f"Found unsupported language label '{example['lang']}'. Supported labels: {LANG_LABELS}."
+                f"Manifest {path} must include an 'audio' (or 'wav') column with audio file paths."
             )
-        if not os.path.exists(example["audio"]):
-            raise FileNotFoundError(f"Audio file not found: {example['audio']}")
-    return examples
+
+    ids = dataset["id"]
+    if any(not example_id for example_id in ids):
+        raise ValueError(f"Manifest {path} contains entries with missing 'id' values.")
+
+    langs = set(dataset["lang"])
+    invalid_langs = sorted(langs - set(LANG_LABELS))
+    if invalid_langs:
+        raise ValueError(
+            "Found unsupported language label(s) "
+            f"{invalid_langs} in manifest {path}. Supported labels: {LANG_LABELS}."
+        )
+
+    audio_paths = dataset["audio"]
+    if any(not audio_path for audio_path in audio_paths):
+        raise ValueError(f"Manifest {path} contains entries with missing audio paths.")
+
+    missing_files = [audio_path for audio_path in audio_paths if not os.path.exists(audio_path)]
+    if missing_files:
+        raise FileNotFoundError(
+            "Audio file(s) not found: " + ", ".join(sorted(set(missing_files)))
+        )
+
+    return dataset
 
 
 def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict:
-    train_examples = read_manifest(config.train_manifest)
-    train_dataset = Dataset.from_list(train_examples)
+    train_dataset = load_manifest_dataset(config.train_manifest)
 
     # Determine evaluation dataset
     if config.eval_manifest:
-        eval_examples = read_manifest(config.eval_manifest)
-        eval_dataset = Dataset.from_list(eval_examples)
+        eval_dataset = load_manifest_dataset(config.eval_manifest)
     elif config.validation_split > 0.0:
         split = train_dataset.train_test_split(test_size=config.validation_split, seed=config.seed)
         train_dataset, eval_dataset = split["train"], split["test"]
