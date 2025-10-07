@@ -20,7 +20,7 @@ validation_manifest_uri = "s3://us-west-2-ehmli/lid-job/manifests/data_valid_093
 
 estimator = PyTorch(
     entry_point="finetune_mms_lid.py",
-    source_dir=".",
+    source_dir="src",
     role=role,
     instance_type="ml.g5.2xlarge",
     instance_count=1,
