@@ -54,12 +54,12 @@ estimator = PyTorch(
 
 inputs = {
     "training": TrainingInput(
-        s3_data="s3://my-bucket/path/to/training/",  # contains train_manifest.jsonl + audio files
+        s3_data="s3://us-west-2-ehmli/lid-job/manifests/data_train_0930.jsonl",  # contains train_manifest.jsonl + audio files
         distribution="FullyReplicated",
         content_type="application/json",
     ),
     "validation": TrainingInput(
-        s3_data="s3://my-bucket/path/to/validation/",  # contains valid_manifest.jsonl + audio files
+        s3_data="s3://us-west-2-ehmli/lid-job/manifests/data_valid_0930.jsonl",  # contains valid_manifest.jsonl + audio files
         distribution="FullyReplicated",
         content_type="application/json",
     ),
