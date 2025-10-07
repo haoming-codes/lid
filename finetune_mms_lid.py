@@ -411,9 +411,34 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
     label_num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
     datasets = datasets.map(encode_label, num_proc=label_num_proc)
 
+    logger = logging.getLogger(__name__)
+
+    train_lengths = [len(audio_record["array"]) for audio_record in datasets["train"]["audio"]]
+    if not train_lengths:
+        raise ValueError("Training dataset does not contain any audio examples to compute length statistics.")
+    max_audio_samples = max(1, int(np.percentile(train_lengths, 95)))
+    logger.info(
+        "Capping audio to the 95th percentile: %d samples (%.2f seconds)",
+        max_audio_samples,
+        max_audio_samples / float(sampling_rate),
+    )
+
+    def crop_array(array: np.ndarray) -> np.ndarray:
+        if array.shape[0] <= max_audio_samples:
+            return array
+        start = (array.shape[0] - max_audio_samples) // 2
+        end = start + max_audio_samples
+        return array[start:end]
+
     def preprocess_batch(batch):
-        audio_arrays = [record["array"] for record in batch["audio"]]
-        inputs = feature_extractor(audio_arrays, sampling_rate=sampling_rate)
+        cropped = [crop_array(record["array"]) for record in batch["audio"]]
+        inputs = feature_extractor(
+            cropped,
+            sampling_rate=sampling_rate,
+            max_length=max_audio_samples,
+            truncation=True,
+            return_attention_mask=True,
+        )
         batch["input_values"] = inputs["input_values"]
         if "attention_mask" in inputs:
             batch["attention_mask"] = inputs["attention_mask"]
