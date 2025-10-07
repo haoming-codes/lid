@@ -448,7 +448,7 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
     sampling_rate = feature_extractor.sampling_rate
     # Let 🤗 Datasets handle decoding/resampling via the Audio feature. This supports local paths,
     # S3 URIs, and other fsspec-compatible locations without custom loaders.
-    audio_feature = Audio(sampling_rate=sampling_rate, mono=True)
+    audio_feature = Audio(sampling_rate=sampling_rate)
     for split in datasets:
         datasets[split] = datasets[split].cast_column("audio", audio_feature)
 
@@ -463,14 +463,11 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
 
     logger = logging.getLogger(__name__)
 
-    def _to_mono_array(audio_value: dict) -> np.ndarray:
-        """Convert the dataset Audio value into a 1D float32 numpy array."""
-        array = audio_value["array"]
-        if array.ndim == 2:
-            array = array.mean(axis=0)
-        return np.asarray(array, dtype=np.float32)
+    def _to_array(audio_value: dict) -> np.ndarray:
+        """Convert the dataset Audio value into a float32 numpy array."""
+        return np.asarray(audio_value["array"], dtype=np.float32)
 
-    train_lengths = [_to_mono_array(audio_value).shape[0] for audio_value in datasets["train"]["audio"]]
+    train_lengths = [_to_array(audio_value).shape[0] for audio_value in datasets["train"]["audio"]]
     if not train_lengths:
         raise ValueError("Training dataset does not contain any audio examples to compute length statistics.")
     max_audio_samples = max(1, int(np.percentile(train_lengths, 95)))
@@ -488,7 +485,7 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
         return array[start:end]
 
     def preprocess_batch(batch):
-        cropped = [crop_array(_to_mono_array(audio_value)) for audio_value in batch["audio"]]
+        cropped = [crop_array(_to_array(audio_value)) for audio_value in batch["audio"]]
         inputs = feature_extractor(
             cropped,
             sampling_rate=sampling_rate,
