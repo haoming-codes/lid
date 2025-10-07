@@ -234,6 +234,7 @@ class FinetuneConfig:
     max_eval_samples: Optional[int]
     dataloader_num_workers: int
     preprocessing_num_workers: int
+    preprocessing_batch_size: int
     initialize_other_from_average: bool
 
 
@@ -342,6 +343,15 @@ def parse_args() -> FinetuneConfig:
         type=int,
         default=4,
         help="Number of worker processes to use during dataset preprocessing steps.",
+    )
+    parser.add_argument(
+        "--preprocessing-batch-size",
+        type=int,
+        default=16,
+        help=(
+            "Batch size to use during dataset preprocessing map operations."
+            " Tune based on available CPU and memory."
+        ),
     )
     parser.add_argument(
         "--initialize-other-from-average",
@@ -506,6 +516,7 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
             batched=True,
             remove_columns=remove_cols,
             num_proc=num_proc,
+            batch_size=config.preprocessing_batch_size,
         )
         datasets[split].set_format(type="torch")
 
