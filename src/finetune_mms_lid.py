@@ -467,10 +467,31 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
         """Convert the dataset Audio value into a float32 numpy array."""
         return np.asarray(audio_value["array"], dtype=np.float32)
 
-    train_lengths = [_to_array(audio_value).shape[0] for audio_value in datasets["train"]["audio"]]
+    length_column = "length" if "length" in datasets["train"].column_names else None
+    temp_length_column = None
+
+    if length_column is None:
+        temp_length_column = "_temp_audio_length"
+
+        def compute_audio_length(batch):
+            batch[temp_length_column] = [len(audio_value["array"]) for audio_value in batch["audio"]]
+            return batch
+
+        num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
+        datasets["train"] = datasets["train"].map(
+            compute_audio_length,
+            batched=True,
+            num_proc=num_proc,
+        )
+        length_column = temp_length_column
+
+    train_lengths = datasets["train"][length_column]
     if not train_lengths:
         raise ValueError("Training dataset does not contain any audio examples to compute length statistics.")
     max_audio_samples = max(1, int(np.percentile(train_lengths, 95)))
+
+    if temp_length_column is not None:
+        datasets["train"] = datasets["train"].remove_columns(temp_length_column)
     logger.info(
         "Capping audio to the 95th percentile: %d samples (%.2f seconds)",
         max_audio_samples,
