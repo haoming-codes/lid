@@ -49,4 +49,4 @@ pip install accelerate
 echo "[INFO] Environment '$ENV_NAME' is ready. Activate it with:"
 echo "       conda activate $ENV_NAME"
 echo "[INFO] To launch fine-tuning:"
-echo "       python finetune_mms_lid.py --help"
+echo "       python src/finetune_mms_lid.py --help"
