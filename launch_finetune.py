@@ -14,7 +14,7 @@ image_uri = image_uris.retrieve(
     image_scope="training",
     region=sagemaker.Session().boto_region_name,
 )
-image_uri = "763104351884.dkr.ecr.us-west-2.amazonaws.com/pytorch-training:2.8.0-gpu-py312-cu129-ubuntu22.04-sagemaker"
+image_uri = "763104351884.dkr.ecr.us-west-2.amazonaws.com/huggingface-pytorch-training:2.5.1-transformers4.49.0-gpu-py311-cu124-ubuntu22.04"
 
 train_manifest_uri = "s3://us-west-2-ehmli/lid-job/manifests/data_train_0930.s3.jsonl"
 validation_manifest_uri = "s3://us-west-2-ehmli/lid-job/manifests/data_valid_0930.s3.jsonl"
