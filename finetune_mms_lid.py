@@ -586,6 +586,7 @@ def main():
         dataloader_num_workers=config.dataloader_num_workers,
         load_best_model_at_end=eval_strategy != "no",
         metric_for_best_model="f1_macro" if eval_strategy != "no" else None,
+        eval_on_start=True
     )
 
     trainer = Trainer(
