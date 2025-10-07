@@ -1,10 +1,10 @@
 """Script to fine-tune facebook/mms-lid-126 for 3-class language identification.
 
 This script expects JSON Lines (jsonl) manifest(s) with one JSON object per
-line. Each object must contain an `id`, a `wav` (or `audio`) key that points to
-an audio file on disk, and a `lang` key with one of the language labels
-("en", "zh", or "other"). An optional `length` field is ignored by the training
-pipeline but can remain in the manifest. Example manifest:
+line. Each object must contain an `id` (or `utt_id`), a `wav` (or `audio`) key
+that points to an audio file on disk, and a `lang` key with one of the language
+labels ("en", "zh", or "other"). An optional `length` field is ignored by the
+training pipeline but can remain in the manifest. Example manifest:
 
 ```
 {"id": "utt_7fa3a1d7ca9c", "wav": "/path/to/audio.wav", "lang": "zh", "length": 2.85}
@@ -330,6 +330,9 @@ def load_manifest_dataset(path: str) -> Dataset:
 
     if dataset.num_rows == 0:
         raise ValueError(f"Manifest {path} did not contain any entries.")
+
+    if "id" not in dataset.column_names and "utt_id" in dataset.column_names:
+        dataset = dataset.rename_column("utt_id", "id")
 
     required_columns = {"id", "lang"}
     missing_columns = required_columns - set(dataset.column_names)
