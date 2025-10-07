@@ -26,6 +26,7 @@ import numpy as np
 from datasets import Audio, ClassLabel, Dataset, DatasetDict, load_dataset
 import evaluate
 import torch
+from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from transformers import (
     AutoFeatureExtractor,
     AutoModelForAudioClassification,
@@ -539,6 +540,25 @@ def main():
                 average="macro",
             )["f1"],
         }
+
+        label_indices = list(range(len(LANG_LABELS)))
+        precisions, recalls, _, _ = precision_recall_fscore_support(
+            labels,
+            preds,
+            labels=label_indices,
+            zero_division=0,
+        )
+        conf_matrix = confusion_matrix(labels, preds, labels=label_indices)
+
+        for idx, label in enumerate(LANG_LABELS):
+            logger.info(
+                "Eval metrics for class '%s': precision=%.4f recall=%.4f",
+                label,
+                float(precisions[idx]),
+                float(recalls[idx]),
+            )
+        logger.info("Eval confusion matrix:\n%s", conf_matrix)
+
         return metrics
 
     eval_strategy = "steps" if "validation" in datasets else "no"
