@@ -3,8 +3,8 @@
 This script expects JSON Lines (jsonl) manifest(s) with one JSON object per
 line. Each object must contain an `id` (or `utt_id`), a `wav` (or `audio`) key
 that points to an audio file on disk, and a `lang` key with one of the language
-labels ("en", "zh", or "other"). An optional `length` field is ignored by the
-training pipeline but can remain in the manifest. Example manifest:
+labels ("en", "zh", or "other"). If present, a `length` field (in seconds) is
+used to derive the 95th-percentile truncation length. Example manifest:
 
 ```
 {"id": "utt_7fa3a1d7ca9c", "wav": "/path/to/audio.wav", "lang": "zh", "length": 2.85}
@@ -477,14 +477,24 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
         """Convert the dataset Audio value into a float32 numpy array."""
         return np.asarray(audio_value["array"], dtype=np.float32)
 
-    length_column = "length" if "length" in datasets["train"].column_names else None
-    temp_length_column = None
+    max_audio_samples: Optional[int] = None
+    percentile_seconds: Optional[float] = None
+    if "length" in datasets["train"].column_names:
+        train_lengths_seconds = np.asarray(datasets["train"]["length"], dtype=np.float64)
+        valid_mask = np.isfinite(train_lengths_seconds) & (train_lengths_seconds > 0)
+        if np.any(valid_mask):
+            percentile_seconds = float(np.percentile(train_lengths_seconds[valid_mask], 95))
+            max_audio_samples = max(1, int(np.ceil(percentile_seconds * sampling_rate)))
+        else:
+            logger.warning(
+                "Manifest length column did not contain any positive finite values; falling back to decoded audio lengths."
+            )
 
-    if length_column is None:
+    if max_audio_samples is None:
         temp_length_column = "_temp_audio_length"
 
         def compute_audio_length(batch):
-            batch[temp_length_column] = [len(audio_value["array"]) for audio_value in batch["audio"]]
+            batch[temp_length_column] = [len(_to_array(audio_value)) for audio_value in batch["audio"]]
             return batch
 
         num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
@@ -492,20 +502,25 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
             compute_audio_length,
             batched=True,
             num_proc=num_proc,
+            batch_size=config.preprocessing_batch_size,
         )
-        length_column = temp_length_column
 
-    train_lengths = datasets["train"][length_column]
-    if not train_lengths:
-        raise ValueError("Training dataset does not contain any audio examples to compute length statistics.")
-    max_audio_samples = max(1, int(np.percentile(train_lengths, 95)))
+        train_lengths = list(datasets["train"][temp_length_column])
+        if not train_lengths:
+            raise ValueError("Training dataset does not contain any audio examples to compute length statistics.")
 
-    if temp_length_column is not None:
+        max_audio_samples = max(1, int(np.percentile(train_lengths, 95)))
+
         datasets["train"] = datasets["train"].remove_columns(temp_length_column)
+        percentile_seconds = max_audio_samples / float(sampling_rate)
+
+    if percentile_seconds is None:
+        percentile_seconds = max_audio_samples / float(sampling_rate)
+
     logger.info(
         "Capping audio to the 95th percentile: %d samples (%.2f seconds)",
         max_audio_samples,
-        max_audio_samples / float(sampling_rate),
+        percentile_seconds,
     )
 
     def crop_array(array: np.ndarray) -> np.ndarray:
