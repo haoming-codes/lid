@@ -237,6 +237,21 @@ class FinetuneConfig:
     initialize_other_from_average: bool
 
 
+def _str_to_bool(value: str | bool) -> bool:
+    """Parse a string representation of truth into a boolean value."""
+
+    if isinstance(value, bool):
+        return value
+
+    lowered = value.lower()
+    if lowered in {"true", "t", "yes", "y", "1"}:
+        return True
+    if lowered in {"false", "f", "no", "n", "0"}:
+        return False
+
+    raise argparse.ArgumentTypeError(f"Expected a boolean value, received '{value}'.")
+
+
 def parse_args() -> FinetuneConfig:
     parser = argparse.ArgumentParser(description="Fine-tune facebook/mms-lid-126")
     parser.add_argument(
@@ -274,15 +289,28 @@ def parse_args() -> FinetuneConfig:
     )
     parser.add_argument("--save-total-limit", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--fp16", action="store_true", help="Enable FP16 training.")
+    parser.add_argument(
+        "--fp16",
+        type=_str_to_bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help="Enable FP16 training.",
+    )
     parser.add_argument(
         "--freeze-feature-extractor",
-        action="store_true",
+        type=_str_to_bool,
+        nargs="?",
+        const=True,
+        default=False,
         help="Freeze the convolutional feature extractor of the backbone.",
     )
     parser.add_argument(
         "--train-classifier-only",
-        action="store_true",
+        type=_str_to_bool,
+        nargs="?",
+        const=True,
+        default=False,
         help="Freeze all model parameters except the classification head.",
     )
     parser.add_argument(
@@ -317,7 +345,10 @@ def parse_args() -> FinetuneConfig:
     )
     parser.add_argument(
         "--initialize-other-from-average",
-        action="store_true",
+        type=_str_to_bool,
+        nargs="?",
+        const=True,
+        default=False,
         help=(
             "Initialize the 'other' classification head using the average of selected"
             " MMS LID languages (East and Southeast Asia, excluding China)."
