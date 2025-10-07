@@ -1,6 +1,5 @@
 """Launch a SageMaker training job for finetune_mms_lid.py."""
 import sagemaker
-from sagemaker.inputs import TrainingInput
 from sagemaker.pytorch import PyTorch
 from sagemaker import image_uris
 
@@ -16,6 +15,9 @@ image_uri = image_uris.retrieve(
     region=sagemaker.Session().boto_region_name,
 )
 
+train_manifest_uri = "s3://us-west-2-ehmli/lid-job/manifests/data_train_0930.jsonl"
+validation_manifest_uri = "s3://us-west-2-ehmli/lid-job/manifests/data_valid_0930.jsonl"
+
 estimator = PyTorch(
     entry_point="finetune_mms_lid.py",
     source_dir=".",
@@ -28,9 +30,9 @@ estimator = PyTorch(
     volume_size=200,  # GB; ensure there is space for audio + checkpoints
     max_run=12 * 3600,
     hyperparameters={
-        # The manifests are expected to live inside the corresponding data channels.
-        "train-manifest": "/opt/ml/input/data/training/train_manifest.jsonl",
-        "eval-manifest": "/opt/ml/input/data/validation/valid_manifest.jsonl",
+        # The manifests can be read directly from S3 by `datasets.load_dataset`.
+        "train-manifest": train_manifest_uri,
+        "eval-manifest": validation_manifest_uri,
         "output-dir": "/opt/ml/model",
         "num-train-epochs": 5,
         "learning-rate": 2e-5,
@@ -52,17 +54,4 @@ estimator = PyTorch(
     dependencies=["requirements.txt"],
 )
 
-inputs = {
-    "training": TrainingInput(
-        s3_data="s3://us-west-2-ehmli/lid-job/manifests/data_train_0930.jsonl",  # contains train_manifest.jsonl + audio files
-        distribution="FullyReplicated",
-        content_type="application/json",
-    ),
-    "validation": TrainingInput(
-        s3_data="s3://us-west-2-ehmli/lid-job/manifests/data_valid_0930.jsonl",  # contains valid_manifest.jsonl + audio files
-        distribution="FullyReplicated",
-        content_type="application/json",
-    ),
-}
-
-estimator.fit(inputs=inputs)
+estimator.fit()
