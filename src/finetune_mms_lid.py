@@ -20,13 +20,17 @@ import argparse
 import logging
 import os
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Optional
 from urllib.parse import urlparse
 
 import numpy as np
 from datasets import Audio, ClassLabel, Dataset, DatasetDict, load_dataset
+from datasets.utils.file_utils import xopen
 import evaluate
 import torch
+import torchaudio
+import torchaudio.functional as audio_functional
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from transformers import (
     AutoFeatureExtractor,
@@ -446,7 +450,7 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
 
     # Ensure consistent sampling rate and label encoding
     sampling_rate = feature_extractor.sampling_rate
-    audio_feature = Audio(sampling_rate=sampling_rate)
+    audio_feature = Audio(sampling_rate=sampling_rate, decode=False)
     for split in datasets:
         datasets[split] = datasets[split].cast_column("audio", audio_feature)
 
@@ -461,7 +465,36 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
 
     logger = logging.getLogger(__name__)
 
-    train_lengths = [len(audio_record["array"]) for audio_record in datasets["train"]["audio"]]
+    def load_audio_array(audio_record: dict) -> np.ndarray:
+        path = audio_record.get("path")
+        bytes_data = audio_record.get("bytes")
+
+        if bytes_data is not None:
+            with BytesIO(bytes_data) as buffer:
+                waveform, sr = torchaudio.load(buffer)
+        elif path is not None:
+            if _is_remote_path(path):
+                with xopen(path, "rb") as file_obj:
+                    waveform, sr = torchaudio.load(file_obj)
+            else:
+                waveform, sr = torchaudio.load(path)
+        else:
+            raise ValueError("Audio record must contain either 'bytes' or 'path'.")
+
+        if waveform.dim() == 2:
+            if waveform.size(0) > 1:
+                waveform = waveform.mean(dim=0, keepdim=True)
+        elif waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0)
+        else:
+            raise ValueError(f"Unsupported audio tensor shape {tuple(waveform.shape)}.")
+
+        if sr != sampling_rate:
+            waveform = audio_functional.resample(waveform, sr, sampling_rate)
+
+        return waveform.squeeze(0).contiguous().numpy().astype(np.float32)
+
+    train_lengths = [len(load_audio_array(audio_record)) for audio_record in datasets["train"]["audio"]]
     if not train_lengths:
         raise ValueError("Training dataset does not contain any audio examples to compute length statistics.")
     max_audio_samples = max(1, int(np.percentile(train_lengths, 95)))
@@ -479,7 +512,7 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
         return array[start:end]
 
     def preprocess_batch(batch):
-        cropped = [crop_array(record["array"]) for record in batch["audio"]]
+        cropped = [crop_array(load_audio_array(record)) for record in batch["audio"]]
         inputs = feature_extractor(
             cropped,
             sampling_rate=sampling_rate,
