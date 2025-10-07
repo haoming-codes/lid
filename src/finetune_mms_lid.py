@@ -20,18 +20,13 @@ import argparse
 import logging
 import os
 from dataclasses import dataclass
-from io import BytesIO
 from typing import Optional
 from urllib.parse import urlparse
 
 import numpy as np
 from datasets import Audio, ClassLabel, Dataset, DatasetDict, load_dataset
-from datasets.utils.file_utils import xopen
 import evaluate
 import torch
-import torchaudio
-import torchaudio.functional as audio_functional
-import soundfile as sf
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from transformers import (
     AutoFeatureExtractor,
@@ -451,7 +446,9 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
 
     # Ensure consistent sampling rate and label encoding
     sampling_rate = feature_extractor.sampling_rate
-    audio_feature = Audio(sampling_rate=sampling_rate, decode=False)
+    # Let 🤗 Datasets handle decoding/resampling via the Audio feature. This supports local paths,
+    # S3 URIs, and other fsspec-compatible locations without custom loaders.
+    audio_feature = Audio(sampling_rate=sampling_rate, mono=True)
     for split in datasets:
         datasets[split] = datasets[split].cast_column("audio", audio_feature)
 
@@ -466,59 +463,14 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
 
     logger = logging.getLogger(__name__)
 
-    def _load_waveform_from_filelike(file_like) -> tuple[torch.Tensor, int]:
-        """Load audio from a file-like object with a torchaudio/soundfile fallback."""
+    def _to_mono_array(audio_value: dict) -> np.ndarray:
+        """Convert the dataset Audio value into a 1D float32 numpy array."""
+        array = audio_value["array"]
+        if array.ndim == 2:
+            array = array.mean(axis=0)
+        return np.asarray(array, dtype=np.float32)
 
-        try:
-            file_like.seek(0)
-        except (AttributeError, OSError):
-            pass
-
-        try:
-            return torchaudio.load(file_like)
-        except RuntimeError:
-            # If the default torchaudio backend cannot handle the file-like object
-            # (e.g. remote S3 handles) fall back to soundfile which fully supports
-            # reading from file objects.
-            try:
-                file_like.seek(0)
-            except (AttributeError, OSError):
-                pass
-
-            data, sr = sf.read(file_like, dtype="float32", always_2d=True)
-            waveform = torch.from_numpy(data.T)
-            return waveform, sr
-
-    def load_audio_array(audio_record: dict) -> np.ndarray:
-        path = audio_record.get("path")
-        bytes_data = audio_record.get("bytes")
-
-        if bytes_data is not None:
-            with BytesIO(bytes_data) as buffer:
-                waveform, sr = _load_waveform_from_filelike(buffer)
-        elif path is not None:
-            if _is_remote_path(path):
-                with xopen(path, "rb") as file_obj:
-                    waveform, sr = _load_waveform_from_filelike(file_obj)
-            else:
-                waveform, sr = torchaudio.load(path)
-        else:
-            raise ValueError("Audio record must contain either 'bytes' or 'path'.")
-
-        if waveform.dim() == 2:
-            if waveform.size(0) > 1:
-                waveform = waveform.mean(dim=0, keepdim=True)
-        elif waveform.dim() == 1:
-            waveform = waveform.unsqueeze(0)
-        else:
-            raise ValueError(f"Unsupported audio tensor shape {tuple(waveform.shape)}.")
-
-        if sr != sampling_rate:
-            waveform = audio_functional.resample(waveform, sr, sampling_rate)
-
-        return waveform.squeeze(0).contiguous().numpy().astype(np.float32)
-
-    train_lengths = [len(load_audio_array(audio_record)) for audio_record in datasets["train"]["audio"]]
+    train_lengths = [_to_mono_array(audio_value).shape[0] for audio_value in datasets["train"]["audio"]]
     if not train_lengths:
         raise ValueError("Training dataset does not contain any audio examples to compute length statistics.")
     max_audio_samples = max(1, int(np.percentile(train_lengths, 95)))
@@ -536,7 +488,7 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
         return array[start:end]
 
     def preprocess_batch(batch):
-        cropped = [crop_array(load_audio_array(record)) for record in batch["audio"]]
+        cropped = [crop_array(_to_mono_array(audio_value)) for audio_value in batch["audio"]]
         inputs = feature_extractor(
             cropped,
             sampling_rate=sampling_rate,
