@@ -31,6 +31,7 @@ import evaluate
 import torch
 import torchaudio
 import torchaudio.functional as audio_functional
+import soundfile as sf
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from transformers import (
     AutoFeatureExtractor,
@@ -465,17 +466,40 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
 
     logger = logging.getLogger(__name__)
 
+    def _load_waveform_from_filelike(file_like) -> tuple[torch.Tensor, int]:
+        """Load audio from a file-like object with a torchaudio/soundfile fallback."""
+
+        try:
+            file_like.seek(0)
+        except (AttributeError, OSError):
+            pass
+
+        try:
+            return torchaudio.load(file_like)
+        except RuntimeError:
+            # If the default torchaudio backend cannot handle the file-like object
+            # (e.g. remote S3 handles) fall back to soundfile which fully supports
+            # reading from file objects.
+            try:
+                file_like.seek(0)
+            except (AttributeError, OSError):
+                pass
+
+            data, sr = sf.read(file_like, dtype="float32", always_2d=True)
+            waveform = torch.from_numpy(data.T)
+            return waveform, sr
+
     def load_audio_array(audio_record: dict) -> np.ndarray:
         path = audio_record.get("path")
         bytes_data = audio_record.get("bytes")
 
         if bytes_data is not None:
             with BytesIO(bytes_data) as buffer:
-                waveform, sr = torchaudio.load(buffer)
+                waveform, sr = _load_waveform_from_filelike(buffer)
         elif path is not None:
             if _is_remote_path(path):
                 with xopen(path, "rb") as file_obj:
-                    waveform, sr = torchaudio.load(file_obj)
+                    waveform, sr = _load_waveform_from_filelike(file_obj)
             else:
                 waveform, sr = torchaudio.load(path)
         else:
