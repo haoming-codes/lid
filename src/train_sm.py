@@ -42,6 +42,7 @@ id2label = {i: lab for lab, i in label2id.items()}
 # =========================
 class PrettyEvalLogger(TrainerCallback):
     def __init__(self, id2label_map): self.id2label_map = id2label_map
+
     @staticmethod
     def _gather(prefix: str, logs: dict):
         out = {}
@@ -50,18 +51,65 @@ class PrettyEvalLogger(TrainerCallback):
                 name = k.split("/", 1)[1] if "/" in k else k[len(prefix):]
                 out[name] = float(v)
         return out
+
+    @staticmethod
+    def _display_label(lbl: str) -> str:
+        if lbl == "cmn": return "zh"
+        if lbl == "eng": return "en"
+        return lbl
+
+    def _ordered_labels(self) -> List[str]:
+        ordered = [self.id2label_map[i] for i in sorted(self.id2label_map)]
+        return [self._display_label(lbl) for lbl in ordered]
+
+    def _format_confusion(self, logs: dict) -> str:
+        labels = self._ordered_labels()
+        def _blank_row():
+            return {pred: 0 for pred in labels}
+        matrix = {lab: _blank_row() for lab in labels}
+        for k, v in logs.items():
+            if not k.startswith("eval_cm/"): continue
+            key = k.split("/", 1)[1]
+            if "->" not in key: continue
+            tgt, pred = key.split("->", 1)
+            if tgt not in matrix: matrix[tgt] = _blank_row()
+            if pred not in matrix[tgt]:
+                matrix[tgt][pred] = 0
+            matrix[tgt][pred] = int(v)
+        header = "pred> " + " ".join(f"{p:>6}" for p in labels)
+        rows = []
+        for tgt in labels:
+            row = " ".join(f"{matrix.get(tgt, {}).get(pred, 0):>6d}" for pred in labels)
+            rows.append(f"true={tgt:>3} {row}")
+        return "\n".join([header] + rows)
+
     def on_log(self, args, state, control, logs=None, **kwargs):
         if not logs or "eval_loss" not in logs: return
-        loss = float(logs.get("eval_loss", float("nan"))); acc = float(logs.get("eval_accuracy", float("nan")))
+        loss = float(logs.get("eval_loss", float("nan")))
+        acc = float(logs.get("eval_accuracy", float("nan")))
         per_class_acc  = self._gather("eval_acc/", logs)
         per_class_prec = self._gather("eval_precision/", logs)
         per_class_rec  = self._gather("eval_recall/", logs)
-        confusion = {k.replace("eval_cm/", ""): int(v) for k, v in logs.items() if k.startswith("eval_cm/")}
-        print(f"valid loss: {loss:.2e}, valid acc: {acc:.2e}, "
-              f"valid per_class_acc: {per_class_acc}, "
-              f"valid per_class_precision: {per_class_prec}, "
-              f"valid per_class_recall: {per_class_rec}, "
-              f"valid confusion: {confusion}", flush=True)
+        labels = self._ordered_labels()
+        per_class_lines = []
+        for lbl in labels:
+            acc_v = per_class_acc.get(lbl, float("nan"))
+            prec_v = per_class_prec.get(lbl, float("nan"))
+            rec_v = per_class_rec.get(lbl, float("nan"))
+            per_class_lines.append(f"  {lbl:>3}: acc={acc_v:6.3f}, prec={prec_v:6.3f}, rec={rec_v:6.3f}")
+        confusion_str = self._format_confusion(logs)
+        print(
+            "\n".join(
+                [
+                    f"Eval step @ {state.global_step}: loss={loss:.4f}, acc={acc:.4f}",
+                    "Per-class metrics:",
+                    *per_class_lines,
+                    "Confusion matrix:",
+                    confusion_str,
+                ]
+            ),
+            flush=True,
+        )
 
 def set_seed(seed=SEED):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
