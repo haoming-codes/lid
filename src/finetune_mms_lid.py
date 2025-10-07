@@ -458,7 +458,9 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
         batch["label"] = class_label.str2int(batch["lang"])
         return batch
 
-    label_num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
+    label_num_proc = (
+        config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
+    )
     datasets = datasets.map(encode_label, num_proc=label_num_proc)
 
     logger = logging.getLogger(__name__)
@@ -498,14 +500,34 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
             batch["attention_mask"] = inputs["attention_mask"]
         return batch
 
+    # Multiprocessing can deadlock when accessing remote audio files, so fall back to a
+    # single process in that scenario to keep preprocessing moving forward.
+    manifests_remote = _is_remote_path(config.train_manifest) or (
+        config.eval_manifest is not None and _is_remote_path(config.eval_manifest)
+    )
+    use_multiprocessing = config.preprocessing_num_workers > 1 and not manifests_remote
+    if config.preprocessing_num_workers > 1 and not use_multiprocessing:
+        logger.info(
+            "Detected remote manifests; disabling multiprocessing for audio feature extraction."
+        )
+
+    def _preprocessing_num_proc() -> Optional[int]:
+        if not use_multiprocessing:
+            return None
+        return config.preprocessing_num_workers
+
     for split in datasets:
         remove_cols = [col for col in datasets[split].column_names if col not in {"label"}]
-        num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
+        num_proc = _preprocessing_num_proc()
+        logger.info(
+            "Preprocessing %s split with %s", split, f"{num_proc} workers" if num_proc else "a single worker"
+        )
         datasets[split] = datasets[split].map(
             preprocess_batch,
             batched=True,
             remove_columns=remove_cols,
             num_proc=num_proc,
+            desc=f"Extracting features ({split})",
         )
         datasets[split].set_format(type="torch")
 
