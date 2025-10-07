@@ -227,6 +227,7 @@ class FinetuneConfig:
     seed: int
     fp16: bool
     freeze_feature_extractor: bool
+    train_classifier_only: bool
     validation_split: float
     max_train_samples: Optional[int]
     max_eval_samples: Optional[int]
@@ -277,6 +278,11 @@ def parse_args() -> FinetuneConfig:
         "--freeze-feature-extractor",
         action="store_true",
         help="Freeze the convolutional feature extractor of the backbone.",
+    )
+    parser.add_argument(
+        "--train-classifier-only",
+        action="store_true",
+        help="Freeze all model parameters except the classification head.",
     )
     parser.add_argument(
         "--validation-split",
@@ -513,6 +519,19 @@ def main():
                 )
 
         del base_model
+
+    if config.train_classifier_only:
+        classifier = getattr(model, "classifier", None)
+        if classifier is None:
+            logger.warning(
+                "Model does not expose a 'classifier' attribute; cannot train classifier only."
+            )
+        else:
+            logger.info("Freezing all parameters except the classifier head.")
+            for param in model.parameters():
+                param.requires_grad = False
+            for param in classifier.parameters():
+                param.requires_grad = True
 
     if config.freeze_feature_extractor:
         logger.info("Freezing feature extractor")
