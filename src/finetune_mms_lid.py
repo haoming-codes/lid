@@ -21,6 +21,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 import numpy as np
 from datasets import Audio, ClassLabel, Dataset, DatasetDict, load_dataset
@@ -327,6 +328,13 @@ def parse_args() -> FinetuneConfig:
     return FinetuneConfig(**vars(args))
 
 
+def _is_remote_path(path: str) -> bool:
+    """Return True if *path* points to a non-local resource."""
+
+    parsed = urlparse(path)
+    return bool(parsed.scheme and parsed.scheme != "file")
+
+
 def load_manifest_dataset(path: str) -> Dataset:
     """Load and validate a jsonl manifest using the 🤗 Datasets loader."""
 
@@ -371,11 +379,20 @@ def load_manifest_dataset(path: str) -> Dataset:
     if any(not audio_path for audio_path in audio_paths):
         raise ValueError(f"Manifest {path} contains entries with missing audio paths.")
 
-    missing_files = [audio_path for audio_path in audio_paths if not os.path.exists(audio_path)]
-    if missing_files:
-        raise FileNotFoundError(
-            "Audio file(s) not found: " + ", ".join(sorted(set(missing_files)))
-        )
+    # For remote manifests (e.g., s3:// URIs) the individual audio paths are also remote and
+    # will be fetched lazily by 🤗 Datasets. In that case we skip the local existence check. The
+    # datasets library – backed by fsspec – will surface a clear error if the remote objects are
+    # missing.
+    if not _is_remote_path(path):
+        missing_files = [
+            audio_path
+            for audio_path in audio_paths
+            if not _is_remote_path(audio_path) and not os.path.exists(audio_path)
+        ]
+        if missing_files:
+            raise FileNotFoundError(
+                "Audio file(s) not found: " + ", ".join(sorted(set(missing_files)))
+            )
 
     return dataset
 

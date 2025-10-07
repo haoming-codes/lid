@@ -1,6 +1,6 @@
 Usage
 ```
-python finetune_mms_lid.py
+python src/finetune_mms_lid.py
 --train-manifest ../manifests/data_train_0930.json
 --eval-manifest ../manifests/data_valid_0930.json
 --per-device-train-batch-size 2
