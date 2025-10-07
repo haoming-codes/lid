@@ -236,21 +236,6 @@ class FinetuneConfig:
     initialize_other_from_average: bool
 
 
-def _strtobool(value):
-    """Interpret common string representations of boolean values."""
-
-    if isinstance(value, bool):
-        return value
-
-    normalized = str(value).lower()
-    if normalized in {"true", "1", "yes", "y"}:
-        return True
-    if normalized in {"false", "0", "no", "n"}:
-        return False
-
-    raise argparse.ArgumentTypeError(f"Expected a boolean value, got '{value}'.")
-
-
 def parse_args() -> FinetuneConfig:
     parser = argparse.ArgumentParser(description="Fine-tune facebook/mms-lid-126")
     parser.add_argument(
@@ -288,28 +273,15 @@ def parse_args() -> FinetuneConfig:
     )
     parser.add_argument("--save-total-limit", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--fp16",
-        nargs="?",
-        const=True,
-        default=False,
-        type=_strtobool,
-        help="Enable FP16 training.",
-    )
+    parser.add_argument("--fp16", action="store_true", help="Enable FP16 training.")
     parser.add_argument(
         "--freeze-feature-extractor",
-        nargs="?",
-        const=True,
-        default=False,
-        type=_strtobool,
+        action="store_true",
         help="Freeze the convolutional feature extractor of the backbone.",
     )
     parser.add_argument(
         "--train-classifier-only",
-        nargs="?",
-        const=True,
-        default=False,
-        type=_strtobool,
+        action="store_true",
         help="Freeze all model parameters except the classification head.",
     )
     parser.add_argument(
@@ -344,10 +316,7 @@ def parse_args() -> FinetuneConfig:
     )
     parser.add_argument(
         "--initialize-other-from-average",
-        nargs="?",
-        const=True,
-        default=False,
-        type=_strtobool,
+        action="store_true",
         help=(
             "Initialize the 'other' classification head using the average of selected"
             " MMS LID languages (East and Southeast Asia, excluding China)."
