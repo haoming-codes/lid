@@ -1,7 +1,11 @@
 """Launch a SageMaker training job for finetune_mms_lid.py."""
+import os
+from urllib.parse import urlparse
+
 import sagemaker
-from sagemaker.pytorch import PyTorch
 from sagemaker import image_uris
+from sagemaker.inputs import TrainingInput
+from sagemaker.pytorch import PyTorch
 
 role = sagemaker.get_execution_role()
 
@@ -19,6 +23,25 @@ image_uri = "763104351884.dkr.ecr.us-west-2.amazonaws.com/huggingface-pytorch-tr
 train_manifest_uri = "s3://us-west-2-ehmli/lid-job/manifests/data_train_0930.s3.jsonl"
 validation_manifest_uri = "s3://us-west-2-ehmli/lid-job/manifests/data_valid_0930.s3.jsonl"
 
+
+def _local_manifest_path(channel_name: str, manifest_uri: str) -> str:
+    """Return the expected local path for a manifest inside the container."""
+
+    manifest_filename = os.path.basename(urlparse(manifest_uri).path)
+    return os.path.join("/opt/ml/input/data", channel_name, manifest_filename)
+
+
+train_channel = TrainingInput(
+    s3_data=train_manifest_uri,
+    s3_data_type="ManifestFile",
+    input_mode="File",
+)
+validation_channel = TrainingInput(
+    s3_data=validation_manifest_uri,
+    s3_data_type="ManifestFile",
+    input_mode="File",
+)
+
 estimator = PyTorch(
     entry_point="finetune_mms_lid.py",
     source_dir="src",
@@ -31,9 +54,9 @@ estimator = PyTorch(
     # volume_size=200,  # GB; ensure there is space for audio + checkpoints
     max_run=12 * 3600,
     hyperparameters={
-        # The manifests can be read directly from S3 by `datasets.load_dataset`.
-        "train-manifest": train_manifest_uri,
-        "eval-manifest": validation_manifest_uri,
+        # When using File mode SageMaker downloads the manifest + payload locally.
+        "train-manifest": _local_manifest_path("train", train_manifest_uri),
+        "eval-manifest": _local_manifest_path("validation", validation_manifest_uri),
         "output-dir": "/opt/ml/model",
         "num-train-epochs": 5,
         "learning-rate": 2e-5,
@@ -55,4 +78,4 @@ estimator = PyTorch(
     dependencies=["requirements.txt"],
 )
 
-estimator.fit()
+estimator.fit({"train": train_channel, "validation": validation_channel})
