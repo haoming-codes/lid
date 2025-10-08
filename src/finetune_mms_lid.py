@@ -207,6 +207,39 @@ OTHER_CLASS_LANGUAGE_CODES = [
 ]
 
 
+def _to_array(audio_value: dict) -> np.ndarray:
+    """Convert the dataset Audio value into a float32 numpy array."""
+
+    return np.asarray(audio_value["array"], dtype=np.float32)
+
+
+def compute_audio_length(batch, *, temp_length_column: str):
+    batch[temp_length_column] = [len(_to_array(audio_value)) for audio_value in batch["audio"]]
+    return batch
+
+
+def extract_features(
+    batch,
+    *,
+    feature_extractor,
+    sampling_rate: int,
+    max_audio_samples: int,
+):
+    audio_arrays = [_to_array(audio_value) for audio_value in batch["audio"]]
+    inputs = feature_extractor(
+        audio_arrays,
+        sampling_rate=sampling_rate,
+        max_length=max_audio_samples,
+        truncation=True,
+        padding="max_length",
+        return_attention_mask=True,
+    )
+    batch["input_values"] = inputs["input_values"]
+    if "attention_mask" in inputs:
+        batch["attention_mask"] = inputs["attention_mask"]
+    return batch
+
+
 @dataclass
 class FinetuneConfig:
     """Container for configuration options."""
@@ -516,10 +549,6 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> tuple[Datas
 
     logger = logging.getLogger(__name__)
 
-    def _to_array(audio_value: dict) -> np.ndarray:
-        """Convert the dataset Audio value into a float32 numpy array."""
-        return np.asarray(audio_value["array"], dtype=np.float32)
-
     max_audio_samples: Optional[int] = None
     percentile_seconds: Optional[float] = None
     if "length" in datasets["train"].column_names:
@@ -536,10 +565,6 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> tuple[Datas
     if max_audio_samples is None:
         temp_length_column = "_temp_audio_length"
 
-        def compute_audio_length(batch):
-            batch[temp_length_column] = [len(_to_array(audio_value)) for audio_value in batch["audio"]]
-            return batch
-
         num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
         datasets["train"] = datasets["train"].map(
             compute_audio_length,
@@ -547,6 +572,7 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> tuple[Datas
             num_proc=num_proc,
             batch_size=config.preprocessing_batch_size,
             desc="Measuring decoded training audio lengths",
+            fn_kwargs={"temp_length_column": temp_length_column},
         )
 
         train_lengths = list(datasets["train"][temp_length_column])
@@ -592,23 +618,6 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> tuple[Datas
     feature_num_proc = (
         config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
     )
-
-    def extract_features(batch, *, feature_extractor, sampling_rate, max_audio_samples):
-        audio_arrays = [
-            np.asarray(audio_value["array"], dtype=np.float32) for audio_value in batch["audio"]
-        ]
-        inputs = feature_extractor(
-            audio_arrays,
-            sampling_rate=sampling_rate,
-            max_length=max_audio_samples,
-            truncation=True,
-            padding="max_length",
-            return_attention_mask=True,
-        )
-        batch["input_values"] = inputs["input_values"]
-        if "attention_mask" in inputs:
-            batch["attention_mask"] = inputs["attention_mask"]
-        return batch
 
     for split in datasets:
         logger.info("Extracting audio features for %s split", split)
