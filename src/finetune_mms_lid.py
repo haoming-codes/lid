@@ -379,6 +379,9 @@ def _is_remote_path(path: str) -> bool:
 def load_manifest_dataset(path: str) -> Dataset:
     """Load and validate a jsonl manifest using the 🤗 Datasets loader."""
 
+    logger = logging.getLogger(__name__)
+    logger.info("Loading manifest from %s", path)
+
     try:
         dataset = load_dataset("json", data_files=path, split="train")
     except Exception as exc:  # pragma: no cover - surfaces config errors
@@ -387,7 +390,14 @@ def load_manifest_dataset(path: str) -> Dataset:
     if dataset.num_rows == 0:
         raise ValueError(f"Manifest {path} did not contain any entries.")
 
+    logger.info(
+        "Loaded %d entries with columns: %s",
+        dataset.num_rows,
+        ", ".join(dataset.column_names),
+    )
+
     if "id" not in dataset.column_names and "utt_id" in dataset.column_names:
+        logger.info("Renaming 'utt_id' column to 'id' for manifest %s", path)
         dataset = dataset.rename_column("utt_id", "id")
 
     required_columns = {"id", "lang"}
@@ -398,6 +408,7 @@ def load_manifest_dataset(path: str) -> Dataset:
 
     if "audio" not in dataset.column_names:
         if "wav" in dataset.column_names:
+            logger.info("Renaming 'wav' column to 'audio' for manifest %s", path)
             dataset = dataset.rename_column("wav", "audio")
         else:
             raise ValueError(
@@ -425,6 +436,7 @@ def load_manifest_dataset(path: str) -> Dataset:
     # datasets library – backed by fsspec – will surface a clear error if the remote objects are
     # missing.
     if not _is_remote_path(path):
+        logger.info("Validating local audio file existence for manifest %s", path)
         missing_files = [
             audio_path
             for audio_path in audio_paths
@@ -434,25 +446,52 @@ def load_manifest_dataset(path: str) -> Dataset:
             raise FileNotFoundError(
                 "Audio file(s) not found: " + ", ".join(sorted(set(missing_files)))
             )
+    else:
+        logger.info("Manifest %s references remote data; deferring file existence checks to datasets", path)
+
+    logger.info(
+        "Manifest %s includes language labels: %s",
+        path,
+        ", ".join(sorted(langs)),
+    )
 
     return dataset
 
 
 def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict:
+    logger = logging.getLogger(__name__)
     train_dataset = load_manifest_dataset(config.train_manifest)
+    logger.info("Training dataset contains %d examples", len(train_dataset))
 
     # Determine evaluation dataset
     if config.eval_manifest:
+        logger.info("Loading validation dataset from explicit manifest: %s", config.eval_manifest)
         eval_dataset = load_manifest_dataset(config.eval_manifest)
     elif config.validation_split > 0.0:
+        logger.info(
+            "Creating validation split from training data with test_size=%.2f and seed=%d",
+            config.validation_split,
+            config.seed,
+        )
         split = train_dataset.train_test_split(test_size=config.validation_split, seed=config.seed)
         train_dataset, eval_dataset = split["train"], split["test"]
+        logger.info(
+            "Post-split sizes - train: %d, validation: %d",
+            len(train_dataset),
+            len(eval_dataset),
+        )
     else:
         eval_dataset = None
 
     datasets = DatasetDict({"train": train_dataset})
     if eval_dataset is not None:
         datasets["validation"] = eval_dataset
+        logger.info(
+            "Using validation dataset with %d examples",
+            len(datasets["validation"]),
+        )
+    else:
+        logger.info("No validation dataset provided or derived; proceeding with training only")
 
     # Ensure consistent sampling rate and label encoding
     sampling_rate = feature_extractor.sampling_rate
@@ -469,7 +508,11 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
         return batch
 
     label_num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
-    datasets = datasets.map(encode_label, num_proc=label_num_proc)
+    datasets = datasets.map(
+        encode_label,
+        num_proc=label_num_proc,
+        desc="Encoding language labels into class indices",
+    )
 
     logger = logging.getLogger(__name__)
 
@@ -503,6 +546,7 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
             batched=True,
             num_proc=num_proc,
             batch_size=config.preprocessing_batch_size,
+            desc="Measuring decoded training audio lengths",
         )
 
         train_lengths = list(datasets["train"][temp_length_column])
@@ -553,15 +597,31 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
             remove_columns=remove_cols,
             num_proc=num_proc,
             batch_size=config.preprocessing_batch_size,
+            desc=f"Extracting audio features for the {split} split",
         )
         datasets[split].set_format(type="torch")
 
     if config.max_train_samples is not None:
-        datasets["train"] = datasets["train"].select(range(min(config.max_train_samples, len(datasets["train"]))))
-    if "validation" in datasets and config.max_eval_samples is not None:
-        datasets["validation"] = datasets["validation"].select(
-            range(min(config.max_eval_samples, len(datasets["validation"])))
+        original_train_len = len(datasets["train"])
+        datasets["train"] = datasets["train"].select(range(min(config.max_train_samples, original_train_len)))
+        logger.info(
+            "Capped training dataset to %d examples (from %d)",
+            len(datasets["train"]),
+            original_train_len,
         )
+    if "validation" in datasets and config.max_eval_samples is not None:
+        original_eval_len = len(datasets["validation"])
+        datasets["validation"] = datasets["validation"].select(
+            range(min(config.max_eval_samples, original_eval_len))
+        )
+        logger.info(
+            "Capped validation dataset to %d examples (from %d)",
+            len(datasets["validation"]),
+            original_eval_len,
+        )
+
+    for split, dataset in datasets.items():
+        logger.info("Prepared %s split with %d examples", split, len(dataset))
 
     return datasets
 
