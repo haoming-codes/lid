@@ -20,7 +20,7 @@ import argparse
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 from urllib.parse import urlparse
 
 import numpy as np
@@ -31,7 +31,6 @@ from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from transformers import (
     AutoFeatureExtractor,
     AutoModelForAudioClassification,
-    DataCollatorWithPadding,
     Trainer,
     TrainingArguments,
     set_seed,
@@ -236,6 +235,60 @@ class FinetuneConfig:
     preprocessing_num_workers: int
     preprocessing_batch_size: int
     initialize_other_from_average: bool
+
+
+@dataclass
+class AudioClassificationDataCollator:
+    """Data collator that loads audio on-the-fly for Hugging Face Trainer."""
+
+    feature_extractor: AutoFeatureExtractor
+    sampling_rate: int
+    max_audio_samples: int
+
+    def __call__(self, features: List[dict]) -> dict:
+        audio_arrays: List[np.ndarray] = []
+        labels: List[int] = []
+
+        for feature in features:
+            audio = feature.get("audio")
+            if audio is None:
+                raise KeyError("Expected 'audio' key in dataset features but none was found.")
+
+            array = audio.get("array") if isinstance(audio, dict) else audio
+            if array is None:
+                raise ValueError("Audio feature is missing decoded samples.")
+
+            np_array = np.asarray(array, dtype=np.float32)
+            if np_array.ndim != 1:
+                raise ValueError("Audio arrays are expected to be mono waveforms (1-D).")
+
+            if np_array.shape[0] > self.max_audio_samples:
+                start = (np_array.shape[0] - self.max_audio_samples) // 2
+                end = start + self.max_audio_samples
+                np_array = np_array[start:end]
+
+            audio_arrays.append(np_array)
+            labels.append(int(feature["label"]))
+
+        inputs = self.feature_extractor(
+            audio_arrays,
+            sampling_rate=self.sampling_rate,
+            max_length=self.max_audio_samples,
+            truncation=True,
+            padding=True,
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+
+        batch = {
+            "input_values": inputs["input_values"],
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
+
+        if "attention_mask" in inputs:
+            batch["attention_mask"] = inputs["attention_mask"]
+
+        return batch
 
 
 def _str_to_bool(value: str | bool) -> bool:
@@ -458,7 +511,7 @@ def load_manifest_dataset(path: str) -> Dataset:
     return dataset
 
 
-def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict:
+def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> tuple[DatasetDict, int]:
     logger = logging.getLogger(__name__)
     train_dataset = load_manifest_dataset(config.train_manifest)
     logger.info("Training dataset contains %d examples", len(train_dataset))
@@ -567,39 +620,8 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
         percentile_seconds,
     )
 
-    def crop_array(array: np.ndarray) -> np.ndarray:
-        if array.shape[0] <= max_audio_samples:
-            return array
-        start = (array.shape[0] - max_audio_samples) // 2
-        end = start + max_audio_samples
-        return array[start:end]
-
-    def preprocess_batch(batch):
-        cropped = [crop_array(_to_array(audio_value)) for audio_value in batch["audio"]]
-        inputs = feature_extractor(
-            cropped,
-            sampling_rate=sampling_rate,
-            max_length=max_audio_samples,
-            truncation=True,
-            return_attention_mask=True,
-        )
-        batch["input_values"] = inputs["input_values"]
-        if "attention_mask" in inputs:
-            batch["attention_mask"] = inputs["attention_mask"]
-        return batch
-
-    for split in datasets:
-        remove_cols = [col for col in datasets[split].column_names if col not in {"label"}]
-        num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
-        datasets[split] = datasets[split].map(
-            preprocess_batch,
-            batched=True,
-            remove_columns=remove_cols,
-            num_proc=num_proc,
-            batch_size=config.preprocessing_batch_size,
-            desc=f"Extracting audio features for the {split} split",
-        )
-        datasets[split].set_format(type="torch")
+    if max_audio_samples is None:
+        raise ValueError("Unable to determine maximum audio length for batching.")
 
     if config.max_train_samples is not None:
         original_train_len = len(datasets["train"])
@@ -621,9 +643,13 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> DatasetDict
         )
 
     for split, dataset in datasets.items():
-        logger.info("Prepared %s split with %d examples", split, len(dataset))
+        logger.info(
+            "Prepared %s split with %d examples (audio will be decoded lazily during batching)",
+            split,
+            len(dataset),
+        )
 
-    return datasets
+    return datasets, max_audio_samples
 
 
 def setup_logging():
@@ -645,7 +671,7 @@ def main():
     feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
 
     logger.info("Loading datasets")
-    datasets = build_dataset_dict(config, feature_extractor)
+    datasets, max_audio_samples = build_dataset_dict(config, feature_extractor)
 
     id2label = {i: label for i, label in enumerate(LANG_LABELS)}
     label2id = {label: i for i, label in id2label.items()}
@@ -729,7 +755,12 @@ def main():
         else:
             logger.warning("Model does not expose a known feature extractor; skipping freeze.")
 
-    data_collator = DataCollatorWithPadding(feature_extractor, padding=True)
+    sampling_rate = feature_extractor.sampling_rate
+    data_collator = AudioClassificationDataCollator(
+        feature_extractor=feature_extractor,
+        sampling_rate=sampling_rate,
+        max_audio_samples=max_audio_samples,
+    )
 
     accuracy = evaluate.load("accuracy")
     f1 = evaluate.load("f1")
@@ -789,6 +820,7 @@ def main():
         weight_decay=config.weight_decay,
         fp16=config.fp16,
         dataloader_num_workers=config.dataloader_num_workers,
+        remove_unused_columns=False,
         load_best_model_at_end=eval_strategy != "no",
         metric_for_best_model="f1_macro" if eval_strategy != "no" else None,
         eval_on_start=True
