@@ -493,6 +493,20 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> tuple[Datas
     else:
         logger.info("No validation dataset provided or derived; proceeding with training only")
 
+    # Determine whether any split references remote audio (e.g., s3:// URIs). When data is
+    # remote, 🤗 Datasets will stream it via fsspec. Multiprocessing map operations against
+    # remote fsspec files have been observed to hang, so we disable multiprocessing in those
+    # scenarios and fall back to single-process preprocessing.
+    split_uses_remote_audio = {
+        split: any(_is_remote_path(path) for path in dataset["audio"])
+        for split, dataset in datasets.items()
+    }
+    any_remote_audio = any(split_uses_remote_audio.values())
+    if any_remote_audio:
+        logger.warning(
+            "Detected remote audio paths; dataset preprocessing will run in a single process to avoid hangs."
+        )
+
     # Ensure consistent sampling rate and label encoding
     sampling_rate = feature_extractor.sampling_rate
     # Let 🤗 Datasets handle decoding/resampling via the Audio feature. This supports local paths,
@@ -507,7 +521,9 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> tuple[Datas
         batch["label"] = class_label.str2int(batch["lang"])
         return batch
 
-    label_num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
+    label_num_proc = (
+        config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
+    )
     datasets = datasets.map(
         encode_label,
         num_proc=label_num_proc,
@@ -540,7 +556,11 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> tuple[Datas
             batch[temp_length_column] = [len(_to_array(audio_value)) for audio_value in batch["audio"]]
             return batch
 
-        num_proc = config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
+        num_proc = (
+            config.preprocessing_num_workers
+            if (config.preprocessing_num_workers > 1 and not any_remote_audio)
+            else None
+        )
         datasets["train"] = datasets["train"].map(
             compute_audio_length,
             batched=True,
@@ -590,7 +610,9 @@ def build_dataset_dict(config: FinetuneConfig, feature_extractor) -> tuple[Datas
         )
 
     feature_num_proc = (
-        config.preprocessing_num_workers if config.preprocessing_num_workers > 1 else None
+        config.preprocessing_num_workers
+        if (config.preprocessing_num_workers > 1 and not any_remote_audio)
+        else None
     )
 
     def extract_features(batch, *, feature_extractor, sampling_rate, max_audio_samples):
